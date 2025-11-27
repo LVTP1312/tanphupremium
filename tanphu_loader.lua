@@ -1,131 +1,154 @@
--- TanPhu Finder Loader v1
---  • Mỗi user có 1 key riêng (TP-xxxx)
---  • Loader gọi API /check_license -> trả về script_url chính
---  • Nếu ok: loadscript, nếu fail: báo lỗi
+--==================================================
+-- TanPhu Finder Premium Loader (Key + HWID + Kick)
+--==================================================
 
-local API_BASE = "https://reparative-mira-dominatingly.ngrok-free.dev"
-
-local Players     = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
-local StarterGui  = game:GetService("StarterGui")
+local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 
---   >>> KEY sẽ được set từ ngoài:
---   getgenv().TANPHU_KEY = "TP-XXXXX"
+-- KEY được set từ snippet trong Discord:
+-- getgenv().TANPHU_KEY = "TP-XXXX..."
 local KEY = getgenv().TANPHU_KEY
 
-------------------------------------------------
--- ✨ HWID
-------------------------------------------------
-local function getHWID()
-    if typeof(gethwid) == "function" then
-        return gethwid()
-    end
-
-    local ok, clientId = pcall(function()
-        return game:GetService("RbxAnalyticsService"):GetClientId()
+if not KEY or KEY == "" then
+    warn("[TanPhu] ❌ Chưa set key (getgenv().TANPHU_KEY).")
+    pcall(function()
+        LocalPlayer:Kick("TanPhu | Chưa set key, hãy lấy script lại từ Discord.")
     end)
-    if ok and clientId then
-        return "RbxClient:" .. clientId
-    end
-
-    return "UserId:" .. tostring(LocalPlayer.UserId)
+    return
 end
 
-------------------------------------------------
--- ✨ http_request / syn.request / request
-------------------------------------------------
+-- URL API check_key (ngrok của m)
+local AUTH_URL = "https://reparative-mira-dominatingly.ngrok-free.dev/check_key"
+local PRODUCT  = "TanPhuFinder"
+
+--========================
+-- HTTP helper
+--========================
 local http_request_impl =
     (typeof(syn) == "table" and typeof(syn.request) == "function" and syn.request)
     or (typeof(http_request) == "function" and http_request)
     or (typeof(request) == "function" and request)
     or (typeof(http) == "table" and typeof(http.request) == "function" and http.request)
 
-local function notify(msg, dur)
-    dur = dur or 10
+local function safeRequest(opts)
+    if not http_request_impl then
+        return nil, "no_http"
+    end
+    local ok, res = pcall(http_request_impl, opts)
+    if not ok then
+        return nil, res
+    end
+    return res, nil
+end
+
+local function hardKick(msg)
+    msg = msg or "TanPhu | Authentication failed."
+    warn("[TanPhu][KICK]", msg)
     pcall(function()
-        StarterGui:SetCore("SendNotification", {
-            Title = "TanPhu Finder",
-            Text = tostring(msg),
-            Duration = dur
-        })
+        LocalPlayer:Kick(msg)
     end)
-    print("[TanPhuFinder] " .. tostring(msg))
 end
 
-if not http_request_impl then
-    notify("Executor không hỗ trợ http_request (syn/request/http).", 12)
-    return
+--========================
+-- HWID helper
+--========================
+local function getHWID()
+    -- ưu tiên gethwid của executor
+    if typeof(gethwid) == "function" then
+        local ok, v = pcall(gethwid)
+        if ok and v then
+            return tostring(v)
+        end
+    end
+
+    -- fallback: ClientId Roblox (vẫn là 1 dạng HWID)
+    local ok, cid = pcall(function()
+        return game:GetService("RbxAnalyticsService"):GetClientId()
+    end)
+    if ok and cid then
+        return tostring(cid)
+    end
+
+    -- nếu tới đây vẫn không có → coi như không có HWID, kick luôn
+    return nil
 end
 
-if not KEY or KEY == "" then
-    notify("Chưa set getgenv().TANPHU_KEY, vui lòng copy script đúng từ Discord.", 12)
-    return
-end
+--========================
+-- CALL API /check_key
+--========================
+local function checkKeyAndLoad()
+    local hwid = getHWID()
+    if not hwid then
+        hardKick("TanPhu | Executor không hỗ trợ HWID, không thể dùng premium.")
+        return
+    end
 
-------------------------------------------------
--- ✨ Gửi POST JSON
-------------------------------------------------
-local function post_json(path, tbl)
-    local body = HttpService:JSONEncode(tbl or {})
-    local ok, res = pcall(http_request_impl, {
-        Url = API_BASE .. path,
+    local payload = {
+        key     = KEY,
+        hwid    = hwid,
+        product = PRODUCT,
+    }
+
+    local body = HttpService:JSONEncode(payload)
+
+    local res, err = safeRequest({
+        Url = AUTH_URL,
         Method = "POST",
         Headers = {
             ["Content-Type"] = "application/json"
         },
         Body = body
     })
-    if not ok then
-        return nil, "http_error: " .. tostring(res)
+
+    if not res then
+        hardKick("TanPhu | Không kết nối được auth server (" .. tostring(err) .. ").")
+        return
     end
-    if not res or res.StatusCode ~= 200 then
-        local code = res and res.StatusCode or "nil"
-        local text = res and res.Body or ""
-        return nil, "status_" .. tostring(code) .. " / " .. tostring(text)
+
+    if res.StatusCode ~= 200 then
+        hardKick("TanPhu | HTTP " .. tostring(res.StatusCode) .. " từ auth server.")
+        return
     end
-    local ok2, data = pcall(function()
+
+    local ok, data = pcall(function()
         return HttpService:JSONDecode(res.Body)
     end)
-    if not ok2 or type(data) ~= "table" then
-        return nil, "json_decode_error"
+    if not ok or type(data) ~= "table" then
+        hardKick("TanPhu | Lỗi đọc dữ liệu từ auth server.")
+        return
     end
-    return data, nil
+
+    if not data.ok then
+        local reason = tostring(data.reason or "unknown")
+        if reason == "key_not_found" then
+            hardKick("TanPhu | Key không tồn tại.")
+        elseif reason == "expired" then
+            hardKick("TanPhu | Key đã hết hạn.")
+        elseif reason == "not_redeemed" then
+            hardKick("TanPhu | Key chưa được redeem trong Discord.")
+        elseif reason == "hwid_mismatch" then
+            hardKick("TanPhu | HWID không khớp. Liên hệ owner để reset HWID.")
+        elseif reason == "wrong_product" then
+            hardKick("TanPhu | Key không thuộc TanPhu Finder.")
+        elseif reason == "missing_key_or_hwid" then
+            hardKick("TanPhu | Thiếu key hoặc HWID.")
+        else
+            hardKick("TanPhu | Key lỗi: " .. reason)
+        end
+        return
+    end
+
+    local script_url = data.script_url
+        or "https://raw.githubusercontent.com/LVTP1312/tanphupremium/main/tanphu_premium_main.lua"
+
+    warn("[TanPhu] ✅ Key OK, loading premium script...")
+    local ok2, err2 = pcall(function()
+        loadstring(game:HttpGet(script_url))()
+    end)
+    if not ok2 then
+        hardKick("TanPhu | Lỗi load premium script: " .. tostring(err2))
+    end
 end
 
-------------------------------------------------
--- ✨ MAIN FLOW
-------------------------------------------------
-notify("Đang kiểm tra key...", 5)
-
-local hwid = getHWID()
-local data, err = post_json("/check_license", {
-    key  = KEY,
-    hwid = hwid,
-})
-
-if not data then
-    notify("Không kết nối được server key: " .. tostring(err), 12)
-    return
-end
-
-if not data.ok then
-    notify("Key lỗi: " .. tostring(data.message or data.error_code or "unknown"), 12)
-    return
-end
-
-local left_days = tonumber(data.left_days or 0) or 0
-notify("Key OK! Còn ~" .. tostring(left_days) .. " ngày. Đang load script...", 8)
-
-local mainUrl = data.script_url
-if type(mainUrl) ~= "string" or mainUrl == "" then
-    notify("Server không trả về script_url.", 10)
-    return
-end
-
-local ok, err2 = pcall(function()
-    loadstring(game:HttpGet(mainUrl))()
-end)
-if not ok then
-    notify("Lỗi khi chạy script chính: " .. tostring(err2), 12)
-end
+checkKeyAndLoad()
